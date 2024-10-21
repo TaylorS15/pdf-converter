@@ -1,73 +1,118 @@
 import { PDFDocument } from 'pdf-lib';
 import { promises as fs } from 'fs';
+import sharp from 'sharp';
+import path from 'path';
 
-async function photosToPdf(
-	photo1Path: string,
-	photo2Path: string,
-	photo3Path: string,
-	outputPdfPath: string
-) {
-	// Create a new PDF document
-	const pdfDoc = await PDFDocument.create();
+const SUPPORTED_EXTENSIONS = new Set([
+  '.jpg', '.jpeg', '.png', '.heic', '.webp',
+]);
+const INPUT_DIR = './Input';
 
-	// Load the images
-	const photo1 = await fs.readFile(photo1Path);
-	const photo2 = await fs.readFile(photo2Path);
-	const photo3 = await fs.readFile(photo3Path);
-
-	// Embed the images in the PDF
-	const image1 = await pdfDoc.embedJpg(photo1);
-	const image2 = await pdfDoc.embedJpg(photo2);
-	const image3 = await pdfDoc.embedJpg(photo3);
-
-	// Add a page for each image
-	const page1 = pdfDoc.addPage();
-	const page2 = pdfDoc.addPage();
-	const page3 = pdfDoc.addPage();
-
-	// Get page dimensions
-	const { width, height } = page1.getSize();
-
-	// Draw the images on their respective pages
-	page1.drawImage(image1, {
-		x: 0,
-		y: 0,
-		width,
-		height,
-	});
-
-	page2.drawImage(image2, {
-		x: 0,
-		y: 0,
-		width,
-		height,
-	});
-
-	page3.drawImage(image3, {
-		x: 0,
-		y: 0,
-		width,
-		height,
-	});
-
-	// Save the PDF
-	const pdfBytes = await pdfDoc.save();
-	await fs.writeFile(outputPdfPath, pdfBytes);
-
-	console.log(`PDF created successfully: ${outputPdfPath}`);
+async function getImageFiles(directory: string): Promise<string[]> {
+  try {
+    const files = await fs.readdir(directory);
+    return files
+      .filter(file => {
+        const ext = path.extname(file).toLowerCase();
+        return SUPPORTED_EXTENSIONS.has(ext);
+      })
+      .map(file => path.join(directory, file))
+      .sort(); // Sort files alphabetically
+  } catch (error) {
+    throw new Error(`Error reading input directory: ${error instanceof Error ? error.message : 'An unknown error occurred'}`);
+  }
 }
 
-// Get command line arguments
-const [photo1Path, photo2Path, photo3Path, outputPdfPath] = process.argv.slice(2);
-
-if (!photo1Path || !photo2Path || !photo3Path || !outputPdfPath) {
-	console.error(
-		'Usage: ts-node script.ts <photo1_path> <photo2_path> <output_pdf_path>'
-	);
-	process.exit(1);
+async function convertToJpg(inputPath: string): Promise<Buffer> {
+  try {
+    const imageBuffer = await fs.readFile(inputPath);
+    const jpgBuffer = await sharp(imageBuffer)
+      .jpeg()
+      .toBuffer();
+    return jpgBuffer;
+  } catch (error) {
+    throw new Error(`Error converting image ${inputPath}: ${error instanceof Error ? error.message : 'An unknown error occurred'}`);
+  }
 }
 
-photosToPdf(photo1Path, photo2Path, photo3Path, outputPdfPath).catch((error) => {
-	console.error('An error occurred:', error);
-	process.exit(1);
+async function photosToPdf(outputPdfPath: string) {
+  try {
+    await fs.access(INPUT_DIR);
+  } catch {
+    throw new Error(`Input directory '${INPUT_DIR}' does not exist. Please create it and add your images.`);
+  }
+
+  const inputPaths = await getImageFiles(INPUT_DIR);
+
+  if (inputPaths.length === 0) {
+    throw new Error('No valid image files found in the Input directory');
+  }
+
+  if (inputPaths.length > 100) {
+    throw new Error('Maximum number of images (100) exceeded');
+  }
+
+  console.log(`Found ${inputPaths.length} valid image files`);
+
+  const pdfDoc = await PDFDocument.create();
+
+  for (const imagePath of inputPaths) {
+    try {
+      const jpgBuffer = await convertToJpg(imagePath);
+      const image = await pdfDoc.embedJpg(jpgBuffer);
+      const page = pdfDoc.addPage();
+
+      const { width, height } = page.getSize();
+      const imageAspectRatio = image.width / image.height;
+      const pageAspectRatio = width / height;
+
+      let drawWidth = width;
+      let drawHeight = height;
+
+      if (imageAspectRatio > pageAspectRatio) {
+        // Image is wider than page proportionally
+        drawHeight = width / imageAspectRatio;
+      } else {
+        // Image is taller than page proportionally
+        drawWidth = height * imageAspectRatio;
+      }
+
+      // Center the image on the page
+      const x = (width - drawWidth) / 2;
+      const y = (height - drawHeight) / 2;
+
+      // Draw the image
+      page.drawImage(image, {
+        x,
+        y,
+        width: drawWidth,
+        height: drawHeight,
+      });
+
+      console.log(`Processed: ${imagePath}`);
+    } catch (error) {
+      console.error(`Error processing ${imagePath}: ${error instanceof Error ? error.message : 'An unknown error occurred'}`);
+      continue; // Continue with next image if one fails
+    }
+  }
+
+  const pdfBytes = await pdfDoc.save();
+  await fs.writeFile(outputPdfPath, pdfBytes);
+  console.log(`PDF created successfully: ${outputPdfPath}`);
+}
+
+const args = process.argv.slice(2);
+
+if (args.length !== 1) {
+  console.error('Usage: ts-node index.ts <output_pdf_path>');
+  console.error('Example: ts-node index.ts output.pdf');
+  console.error('Note: Place all your images in the "./Input" directory');
+  process.exit(1);
+}
+
+const outputPdfPath = args[0];
+
+photosToPdf(outputPdfPath).catch((error) => {
+  console.error('An error occurred:', error);
+  process.exit(1);
 });
